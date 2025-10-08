@@ -1,0 +1,127 @@
+# Build GitHub Container Registry Carpart APIs
+# Auteur: Nicolas JOUIN--DERRIEN
+
+name: Build GitHub Container Registry
+
+on:
+  workflow_run:
+    workflows: ["Tests d'Intégration"]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build_ghcr:
+    name: Build with Buildah & Push to GHCR
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install Buildah
+      run: |
+        echo "Installation de Buildah..."
+        sudo apt-get update
+        sudo apt-get install -y buildah
+        buildah version
+
+    - name: Log in to GitHub Container Registry
+      run: |
+        echo "Connexion au GitHub Container Registry..."
+        echo ${{ secrets.GITHUB_TOKEN }} | buildah login -u ${{ github.actor }} --password-stdin ghcr.io
+
+    - name: Repository Information
+      run: |
+        echo "REPOSITORY GITHUB CONTAINER REGISTRY"
+        echo "===================================="
+        echo "Registry: ghcr.io/${{ github.repository_owner }}"
+        echo "Tags par service (LATEST UNIQUEMENT):"
+        echo "   • carpart-api:latest"
+        echo "   • carpart-client-api:latest"
+        echo "   • carpart-mongo:latest"
+        echo "   • carpart-client-mysql:latest"
+        echo "===================================="
+
+    - name: Build and push Stock API with Buildah
+      run: |
+        echo "Construction et push de l'API Stock avec Buildah..."
+        cd carpart-api
+
+        # Build et push de l'image API Stock
+        buildah build-using-dockerfile \
+          -f Dockerfile.api \
+          -t "ghcr.io/${{ github.repository_owner }}/carpart-api:latest" \
+          .
+
+        echo "Push de l'image API Stock..."
+        buildah push "ghcr.io/${{ github.repository_owner }}/carpart-api:latest"
+
+        echo "Image API Stock poussée avec succès"
+
+    - name: Build and push Client API with Buildah
+      run: |
+        echo "Construction et push de l'API Client avec Buildah..."
+        cd carpart-client
+
+        # Build et push de l'image API Client
+        buildah build-using-dockerfile \
+          -f Dockerfile.api \
+          -t "ghcr.io/${{ github.repository_owner }}/carpart-client-api:latest" \
+          .
+
+        echo "Push de l'image API Client..."
+        buildah push "ghcr.io/${{ github.repository_owner }}/carpart-client-api:latest"
+
+        echo "Image API Client poussée avec succès"
+
+    - name: Build and push MongoDB with Buildah
+      run: |
+        echo "Construction et push de MongoDB avec Buildah..."
+        cd carpart-api
+
+        # Build et push de l'image MongoDB
+        buildah build-using-dockerfile \
+          -f Dockerfile.db \
+          -t "ghcr.io/${{ github.repository_owner }}/carpart-mongo:latest" \
+          .
+
+        echo "Push de l'image MongoDB..."
+        buildah push "ghcr.io/${{ github.repository_owner }}/carpart-mongo:latest"
+
+        echo "Image MongoDB poussée avec succès"
+
+    - name: Build and push MySQL with Buildah
+      run: |
+        echo "Construction et push de MySQL avec Buildah..."
+        cd carpart-client
+
+        # Build et push de l'image MySQL
+        buildah build-using-dockerfile \
+          -f Dockerfile.db \
+          -t "ghcr.io/${{ github.repository_owner }}/carpart-client-mysql:latest" \
+          .
+
+        echo "Push de l'image MySQL..."
+        buildah push "ghcr.io/${{ github.repository_owner }}/carpart-client-mysql:latest"
+
+        echo "Image MySQL poussée avec succès"
+
+    - name: GitHub Container Registry Summary
+      run: |
+        echo ""
+        echo "TOUTES LES IMAGES POUSSÉES AVEC SUCCÈS SUR GHCR !"
+        echo "=================================================="
+        echo "Registry GitHub Container Registry: ghcr.io/${{ github.repository_owner }}"
+        echo ""
+        echo " 4 Images disponibles (LATEST UNIQUEMENT):"
+        echo "  • ghcr.io/${{ github.repository_owner }}/carpart-api:latest"
+        echo "  • ghcr.io/${{ github.repository_owner }}/carpart-client-api:latest"
+        echo "  • ghcr.io/${{ github.repository_owner }}/carpart-mongo:latest"
+        echo "  • ghcr.io/${{ github.repository_owner }}/carpart-client-mysql:latest"
+        echo ""
+        echo "=================================================="

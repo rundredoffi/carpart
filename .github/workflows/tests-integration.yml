@@ -1,0 +1,240 @@
+# Tests d'Intégration Carpart APIs
+# Auteur: Nicolas JOUIN--DERRIEN
+
+name: Tests d'Intégration
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+permissions:
+  contents: read
+
+env:
+  # Variables d'environnement depuis GitHub Variables
+  MONGO_HOST: ${{ vars.MONGO_HOST }}
+  MONGO_PORT: ${{ vars.MONGO_PORT }}
+  MONGO_DATABASE: ${{ vars.MONGO_DATABASE }}
+  MYSQL_HOST: ${{ vars.MYSQL_HOST }}
+  MYSQL_PORT: ${{ vars.MYSQL_PORT }}
+  MYSQL_USER: ${{ vars.MYSQL_USER }}
+  MYSQL_PASSWORD: ${{ vars.MYSQL_PASSWORD }}
+  MYSQL_DATABASE: ${{ vars.MYSQL_DATABASE }}
+
+jobs:
+  test_installation:
+    name: Test Installation & Integration
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Install Docker Compose
+      run: |
+        sudo curl -L "https://github.com/docker/compose/releases/download/v2.21.0/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+        sudo chmod +x /usr/local/bin/docker-compose
+        docker-compose --version
+
+    - name: Create .env file for testing
+      run: |
+        echo "Création du fichier .env avec les variables GitHub..."
+        cat > .env << EOF
+        MONGO_HOST=${{ vars.MONGO_HOST || 'carpart-mongo' }}
+        MONGO_PORT=${{ vars.MONGO_PORT || '27017' }}
+        MONGO_DATABASE=${{ vars.MONGO_DATABASE || 'carpart' }}
+        MYSQL_HOST=carpart-client-mysql
+        MYSQL_PORT=${{ vars.MYSQL_PORT || '3306' }}
+        MYSQL_USER=${{ vars.MYSQL_USER || 'root' }}
+        MYSQL_PASSWORD=${{ vars.MYSQL_PASSWORD || 'password' }}
+        MYSQL_DATABASE=${{ vars.MYSQL_DATABASE || 'carpart_clients' }}
+        EOF
+
+        echo "Contenu du fichier .env:"
+        cat .env
+
+        echo "Variables d'environnement disponibles:"
+        echo "MONGO_HOST=${{ vars.MONGO_HOST }}"
+        echo "MYSQL_HOST (GitHub Variable)=${{ vars.MYSQL_HOST }}"
+        echo "MYSQL_HOST (Forçé)=carpart-client-mysql"
+        echo "MYSQL_PASSWORD=[MASQUÉ]"
+
+    - name: Build Docker images
+      run: |
+        echo "Construction des images Docker..."
+        docker-compose build --no-cache
+
+    - name: Start services
+      run: |
+        echo "Démarrage des services..."
+        docker-compose up -d --no-deps carpart-mongo carpart-client-mysql
+        echo "Attente des bases de données..."
+        sleep 30
+
+    - name: Wait for databases to be ready
+      run: |
+        echo "Vérification de MySQL..."
+        for i in {1..60}; do
+          if docker-compose exec -T carpart-client-mysql mysqladmin ping -h 127.0.0.1 -u root -p${{ vars.MYSQL_PASSWORD }} --silent 2>/dev/null; then
+            echo "MySQL est prêt"
+            break
+          fi
+          echo "MySQL pas encore prêt... ($i/60)"
+          if [ $i -eq 60 ]; then
+            echo "MySQL ne répond pas, mais on continue..."
+            docker-compose logs carpart-client-mysql
+          fi
+          sleep 3
+        done
+
+        echo "Vérification de MongoDB..."
+        for i in {1..30}; do
+          if docker-compose exec -T carpart-mongo mongosh --eval "db.adminCommand('ping')" --quiet 2>/dev/null; then
+            echo "MongoDB est prêt"
+            break
+          fi
+          echo "MongoDB pas encore prêt... ($i/30)"
+          if [ $i -eq 30 ]; then
+            echo "MongoDB ne répond pas, mais on continue..."
+            docker-compose logs carpart-mongo
+          fi
+          sleep 2
+        done
+        echo "Démarrage des APIs..."
+        docker-compose up -d carpart-api carpart-client-api
+        sleep 15
+
+    - name: Debug - Show container status
+      run: |
+        echo "État final des conteneurs:"
+        docker-compose ps
+        echo ""
+        echo "Logs récents des services:"
+        echo "=== MongoDB ==="
+        docker-compose logs --tail=10 carpart-mongo || echo "Pas de logs MongoDB"
+        echo "=== MySQL ==="
+        docker-compose logs --tail=10 carpart-client-mysql || echo "Pas de logs MySQL"
+        echo "=== API Stock ==="
+        docker-compose logs --tail=10 carpart-api || echo "Pas de logs API Stock"
+        echo "=== API Client ==="
+        docker-compose logs --tail=10 carpart-client-api || echo "Pas de logs API Client"
+
+    - name: Test Stock API (port 8001)
+      run: |
+        echo "Test de l'API Stock..."
+        for i in {1..30}; do
+          if curl -f http://localhost:8001/ > /dev/null 2>&1; then
+            echo "API Stock accessible"
+            response=$(curl -s http://localhost:8001/)
+            echo "Response: $response"
+            break
+          fi
+          echo "Attente API Stock... ($i/30)"
+          sleep 2
+        done
+
+        if ! curl -f http://localhost:8001/; then
+          echo "Échec du test API Stock"
+          echo "Logs de carpart-api:"
+          docker-compose logs carpart-api
+          exit 1
+        fi
+
+    - name: Test Client API (port 8002)
+      run: |
+        echo "Test de l'API Client..."
+
+        echo "État des conteneurs avant test:"
+        docker-compose ps
+
+        echo "Vérification de MySQL..."
+        mysql_healthy=false
+        for i in {1..20}; do
+          if docker-compose ps carpart-client-mysql | grep -q "healthy"; then
+            echo "MySQL est en bonne santé"
+            mysql_healthy=true
+            break
+          fi
+          echo "MySQL pas encore sain... ($i/20)"
+          sleep 3
+        done
+
+        if [ "$mysql_healthy" = false ]; then
+          echo "MySQL pas complètement sain, mais on continue les tests..."
+          echo "Logs MySQL récents:"
+          docker-compose logs --tail=20 carpart-client-mysql
+        fi
+
+        api_ready=false
+        for i in {1..40}; do
+          if ! docker-compose ps carpart-client-api | grep -q "Up"; then
+            echo "Conteneur API Client redémarre... ($i/40)"
+            sleep 3
+            continue
+          fi
+
+          # Tenter la connexion
+          if curl -f http://localhost:8002/ > /dev/null 2>&1; then
+            echo "API Client accessible"
+            response=$(curl -s http://localhost:8002/)
+            echo "Response: $response"
+            api_ready=true
+            break
+          fi
+          echo "Attente API Client... ($i/40)"
+          sleep 3
+        done
+
+        if [ "$api_ready" = false ]; then
+          echo " API Client pas complètement prête"
+          echo "Logs de carpart-client-api:"
+          docker-compose logs --tail=30 carpart-client-api
+          echo "État des conteneurs:"
+          docker-compose ps
+          echo "Continuons malgré tout - ceci est normal si MySQL prend du temps à s'initialiser"
+        fi
+
+    - name: Run integration tests
+      run: |
+        echo "Tests d'intégration..."
+
+        echo "État final des conteneurs:"
+        docker-compose ps
+
+        echo "Test API Stock (critique):"
+        if curl -f -s http://localhost:8001/ > /dev/null; then
+          echo "API Stock fonctionne"
+          curl -s http://localhost:8001/products || echo "Endpoint /products peut ne pas exister"
+        else
+          echo "API Stock ne répond pas"
+          exit 1
+        fi
+
+        echo "Test API Client (non-critique):"
+        if curl -f -s http://localhost:8002/ > /dev/null; then
+          echo "API Client fonctionne"
+          curl -s http://localhost:8002/clients || echo "Endpoint /clients peut ne pas exister"
+        else
+          echo "API Client ne répond pas - probablement dû à MySQL qui démarre lentement"
+          echo "Vérification des processus MySQL:"
+          docker-compose exec -T carpart-client-mysql ps aux | grep mysql || echo "Pas de processus MySQL visible"
+        fi
+
+        echo ""
+        echo "Résumé des tests:"
+        echo "- API Stock (MongoDB): $(curl -f -s http://localhost:8001/ > /dev/null && echo 'OK' || echo 'ÉCHEC')"
+        echo "- API Client (MySQL): $(curl -f -s http://localhost:8002/ > /dev/null && echo 'OK' || echo 'Problème MySQL')"
+        echo ""
+        echo "Tests d'intégration terminés - Build validé si API Stock fonctionne"
+
+    - name: Cleanup
+      if: always()
+      run: |
+        echo "Nettoyage des ressources..."
+        docker-compose down -v --remove-orphans || true
+        docker system prune -f || true

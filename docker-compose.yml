@@ -1,0 +1,94 @@
+services:
+  # Base de données MongoDB pour l'API Stock (carpart-api)
+  carpart-mongo:
+    # Utilise l'image Docker Hub si disponible, sinon build local
+    image: ${DOCKER_HUB_USERNAME:-local}/carpart:mongo-latest
+    build:
+      context: ./carpart-api
+      dockerfile: Dockerfile.db
+    container_name: carpart-mongo
+    ports:
+      - "27017:27017"
+    networks:
+      - carpart-network
+    volumes:
+      - mongo_data:/data/db
+    restart: unless-stopped
+
+  # API Stock (carpart-api)
+  carpart-api:
+    # Utilise l'image Docker Hub si disponible, sinon build local
+    image: ${DOCKER_HUB_USERNAME:-local}/carpart:api-stock-latest
+    build:
+      context: ./carpart-api
+      dockerfile: Dockerfile.api
+    container_name: carpart-api
+    ports:
+      - "8001:8000"
+    depends_on:
+      - carpart-mongo
+    networks:
+      - carpart-network
+    environment:
+      - MONGO_HOST=${MONGO_HOST}
+      - MONGO_PORT=${MONGO_PORT}
+      - MONGO_DATABASE=${MONGO_DATABASE}
+    restart: unless-stopped
+
+  # Base de données MySQL pour l'API Client (carpart-client)
+  carpart-client-mysql:
+    # Utilise l'image Docker Hub si disponible, sinon build local
+    image: ${DOCKER_HUB_USERNAME:-local}/carpart:mysql-latest
+    build:
+      context: ./carpart-client
+      dockerfile: Dockerfile.db
+    container_name: carpart-client-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_PASSWORD:-password}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-carpart_clients}
+      MYSQL_ROOT_HOST: '%'
+      MYSQL_ALLOW_EMPTY_PASSWORD: "no"
+    ports:
+      - "3307:3306"  # Port différent pour éviter les conflits
+    networks:
+      - carpart-network
+    volumes:
+      - mysql_client_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -p${MYSQL_PASSWORD:-password} --silent"]
+      timeout: 20s
+      retries: 10
+      interval: 5s
+      start_period: 60s
+    restart: unless-stopped
+
+  # API Client (carpart-client)
+  carpart-client-api:
+    # Utilise l'image Docker Hub si disponible, sinon build local
+    image: ${DOCKER_HUB_USERNAME:-local}/carpart:api-client-latest
+    build:
+      context: ./carpart-client
+      dockerfile: Dockerfile.api
+    container_name: carpart-client-api
+    ports:
+      - "8002:8000"
+    depends_on:
+      carpart-client-mysql:
+        condition: service_healthy
+    networks:
+      - carpart-network
+    environment:
+      - MYSQL_HOST=${MYSQL_HOST:-carpart-client-mysql}
+      - MYSQL_PORT=${MYSQL_PORT:-3306}
+      - MYSQL_USER=${MYSQL_USER:-root}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD:-password}
+      - MYSQL_DATABASE=${MYSQL_DATABASE:-carpart_clients}
+    restart: unless-stopped
+
+networks:
+  carpart-network:
+    driver: bridge
+
+volumes:
+  mongo_data:
+  mysql_client_data:
